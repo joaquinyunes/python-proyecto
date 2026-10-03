@@ -74,3 +74,26 @@ def test_no_sirve_archivos_fuera_de_clips(server, ruta):
     base, *_ = server
     status, _, body = get(base + ruta)
     assert status == 404 and b"NO DEBERIA" not in body
+
+
+def test_paginas_de_torneo_y_partido(tmp_path):
+    db = Store(":memory:")
+    a = db.add_player("<b>Ana</b>"); b = db.add_player("Beto")
+    t = db.create_tournament("<i>Liga</i>", "futbol", a, rank_by=("wins", "gol"))
+    db.join_tournament(t, b); db.schedule_tournament(t)
+    m = db.start_fixture(db.tournament_fixtures(t)[0]["id"], dorsal_a=10, dorsal_b=7)
+    db.add_event(m, a, "gol"); db.finish_match(m); db.close_tournament(t)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db, tmp_path))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        _, _, body = get(f"{base}/")
+        assert b"/torneo/%d" % t in body and b"<i>" not in body
+        status, _, body = get(f"{base}/torneo/{t}")
+        assert status == 200 and b"<i>Liga" not in body and b"<b>Ana" not in body
+        assert b"Campe" in body and b"jugado" in body and b"/partido/%d" % m in body
+        status, _, body = get(f"{base}/partido/{m}")
+        assert status == 200 and b"1 - 0" in body and b"&#11088;" in body and b"Terminado" in body
+        assert get(f"{base}/torneo/99")[0] == 404 and get(f"{base}/partido/99")[0] == 404
+    finally:
+        srv.shutdown(); db.close()

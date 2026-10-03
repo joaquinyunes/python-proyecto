@@ -14,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import fixtures as fx
 from . import tournaments
 from .sports import get_sport
 
@@ -34,6 +35,10 @@ CREATE TABLE IF NOT EXISTS tournament_players(
   tournament_id INTEGER NOT NULL REFERENCES tournaments(id),
   player_id INTEGER NOT NULL REFERENCES players(id),
   PRIMARY KEY(tournament_id, player_id));
+CREATE TABLE IF NOT EXISTS fixtures(
+  id INTEGER PRIMARY KEY, tournament_id INTEGER NOT NULL REFERENCES tournaments(id),
+  round INTEGER NOT NULL, a_id INTEGER NOT NULL REFERENCES players(id),
+  b_id INTEGER NOT NULL REFERENCES players(id), match_id INTEGER REFERENCES matches(id));
 CREATE TABLE IF NOT EXISTS matches(
   id INTEGER PRIMARY KEY, sport TEXT NOT NULL,
   tournament_id INTEGER REFERENCES tournaments(id),
@@ -380,6 +385,10 @@ class Store:
         t["rank_by"] = tuple(json.loads(t["rank_by"]))
         return t
 
+    def list_tournaments(self) -> list[dict]:
+        return [{**dict(r), "rank_by": tuple(json.loads(r["rank_by"]))}
+                for r in self._q("SELECT * FROM tournaments ORDER BY id DESC")]
+
     def join_tournament(self, tournament_id: int, player_id: int) -> None:
         t = self.get_tournament(tournament_id)
         if t is None:
@@ -412,3 +421,76 @@ class Store:
         self._w("UPDATE tournaments SET closed_at=?, champion_id=? WHERE id=?",
                 (time.time(), champion, tournament_id))
         return champion
+
+    # ----------------------------------------------------------- calendario
+    def schedule_tournament(self, tournament_id: int, *, double: bool = False) -> int:
+        """Genera el fixture todos-contra-todos entre los miembros. Devuelve cuántos cruces."""
+        t = self.get_tournament(tournament_id)
+        if t is None:
+            raise ValueError(f"torneo {tournament_id} no existe")
+        if t["closed_at"] is not None:
+            raise ValueError("el torneo ya está cerrado")
+        if self._q("SELECT 1 FROM fixtures WHERE tournament_id=?", (tournament_id,)):
+            raise ValueError("el torneo ya tiene calendario")
+        members = sorted(r["player_id"] for r in self._q(
+            "SELECT player_id FROM tournament_players WHERE tournament_id=?", (tournament_id,)))
+        rounds = fx.round_robin(members, double=double)
+        with self._lock, self._db:
+            for i, pairs in enumerate(rounds, 1):
+                for a, b in pairs:
+                    self._db.execute("INSERT INTO fixtures(tournament_id, round, a_id, b_id) "
+                                     "VALUES (?,?,?,?)", (tournament_id, i, a, b))
+        return sum(len(r) for r in rounds)
+
+    def tournament_fixtures(self, tournament_id: int) -> list[dict]:
+        """Cruces con su estado: 'pendiente', 'en juego' o 'jugado'."""
+        out = []
+        for r in self._q(
+                "SELECT f.*, m.finished_at, m.winner FROM fixtures f LEFT JOIN matches m "
+                "ON m.id=f.match_id WHERE f.tournament_id=? ORDER BY f.round, f.id", (tournament_id,)):
+            d = dict(r)
+            d["status"] = ("pendiente" if d["match_id"] is None
+                           else "jugado" if d["finished_at"] else "en juego")
+            out.append(d)
+        return out
+
+    def start_fixture(self, fixture_id: int, *, dorsal_a: int | None = None,
+                      dorsal_b: int | None = None) -> int:
+        """Crea el partido de un cruce (a = lado A, b = lado B) y lo enlaza. Devuelve match_id."""
+        rows = self._q("SELECT f.*, t.sport FROM fixtures f JOIN tournaments t "
+                       "ON t.id=f.tournament_id WHERE f.id=?", (fixture_id,))
+        if not rows:
+            raise ValueError(f"cruce {fixture_id} no existe")
+        f = rows[0]
+        if f["match_id"] is not None:
+            raise ValueError("ese cruce ya se está jugando o se jugó")
+        m = self.create_match(f["sport"], tournament_id=f["tournament_id"])
+        self.add_match_player(m, f["a_id"], "A", dorsal_a)
+        self.add_match_player(m, f["b_id"], "B", dorsal_b)
+        self._w("UPDATE fixtures SET match_id=? WHERE id=?", (m, fixture_id))
+        return m
+
+    # -------------------------------------------------------------- resumen
+    def match_summary(self, match_id: int) -> dict:
+        """Marcador, eventos por jugador y la figura (MVP) del partido."""
+        m = self.get_match(match_id)
+        if m is None:
+            raise ValueError(f"partido {match_id} no existe")
+        players = []
+        for r in self._q("SELECT mp.player_id, mp.side, mp.dorsal, p.name FROM match_players mp "
+                         "JOIN players p ON p.id=mp.player_id WHERE mp.match_id=?", (match_id,)):
+            evs = {e["type"]: e["n"] for e in self._q(
+                "SELECT type, COUNT(*) AS n FROM events WHERE match_id=? AND player_id=? GROUP BY type",
+                (match_id, r["player_id"]))}
+            pts = self._q("SELECT COALESCE(SUM(points),0) AS p FROM events WHERE match_id=? AND "
+                          "player_id=?", (match_id, r["player_id"]))[0]["p"]
+            players.append({"player_id": r["player_id"], "name": r["name"], "side": r["side"],
+                            "dorsal": r["dorsal"], "events": evs, "points": pts,
+                            "actions": sum(evs.values())})
+        # figura: más puntos; si empatan, más acciones (asistencias, atajadas...); luego id estable
+        mvp = max(players, key=lambda x: (x["points"], x["actions"], -x["player_id"]), default=None)
+        if mvp is not None and mvp["actions"] == 0:
+            mvp = None
+        return {"match_id": match_id, "sport": m["sport"], "score": self.match_score(match_id),
+                "winner": m["winner"], "finished": m["finished_at"] is not None,
+                "players": players, "mvp": mvp["player_id"] if mvp else None}

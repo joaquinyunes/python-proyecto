@@ -14,7 +14,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .sports import SPORTS
+from .sports import SPORTS, get_sport
+from .tournaments import available_metrics
 from .store import Store
 
 CSS = ("body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem}"
@@ -53,6 +54,10 @@ def make_handler(store: Store, clips_dir: Path):
                 return self._index()
             if m := re.fullmatch(r"/jugador/(\d+)", path):
                 return self._player(int(m[1]))
+            if m := re.fullmatch(r"/torneo/(\d+)", path):
+                return self._tournament(int(m[1]))
+            if m := re.fullmatch(r"/partido/(\d+)", path):
+                return self._match(int(m[1]))
             if path.startswith("/clips/"):
                 return self._clip(path[len("/clips/"):])
             self._send(404, _page("No encontrado", "<h1>404</h1>"))
@@ -63,8 +68,50 @@ def make_handler(store: Store, clips_dir: Path):
                 f"<td>{store.player_stats(p['id'])['matches']}</td>"
                 f"<td>{len(store.list_clips(player_id=p['id']))}</td></tr>"
                 for p in store.list_players())
+            torneos = "".join(
+                f"<li><a href='/torneo/{t['id']}'>{html.escape(t['name'])}</a> ({html.escape(t['sport'])})</li>"
+                for t in store.list_tournaments())
             self._send(200, _page("Jugadores", "<h1>Jugadores</h1><table><tr><th>Jugador<th>Partidos"
-                                  f"<th>Jugadas</tr>{rows}</table>"))
+                                  f"<th>Jugadas</tr>{rows}</table><h2>Torneos</h2><ul>{torneos or '<li>Ninguno todavía</li>'}</ul>"))
+
+        def _name(self, pid: int) -> str:
+            return html.escape(store.get_player(pid)["name"])
+
+        def _tournament(self, tid: int):
+            t = store.get_tournament(tid)
+            if t is None:
+                return self._send(404, _page("No encontrado", "<h1>Torneo no encontrado</h1>"))
+            metrics = available_metrics(get_sport(t["sport"]))
+            regla = " &rarr; ".join(html.escape(metrics[m]) for m in t["rank_by"])
+            filas = "".join(
+                f"<tr><td>{r['position']}<td><a href='/jugador/{r['player_id']}'>{self._name(r['player_id'])}</a>"
+                f"<td>{r['matches']}<td>{r['wins']}<td>{r['draws']}<td>{r['losses']}<td>{r['points']}</tr>"
+                for r in store.leaderboard(tid))
+            cruces = "".join(
+                f"<tr><td>{f['round']}<td>{self._name(f['a_id'])} vs {self._name(f['b_id'])}<td>{f['status']}"
+                f"<td>{'<a href=/partido/%d>ver</a>' % f['match_id'] if f['match_id'] else ''}</tr>"
+                for f in store.tournament_fixtures(tid))
+            campeon = f"<p><b>Campeón: {self._name(t['champion_id'])}</b></p>" if t["champion_id"] else ""
+            self._send(200, _page(t["name"], f"<p><a href='/'>&larr; Inicio</a></p><h1>{html.escape(t['name'])}</h1>"
+                                  f"{campeon}<p>Gana: {regla}</p><table><tr><th>#<th>Jugador<th>PJ<th>G<th>E<th>P"
+                                  f"<th>Pts</tr>{filas}</table><h2>Calendario</h2><table><tr><th>Ronda<th>Cruce"
+                                  f"<th>Estado<th></tr>{cruces}</table>"))
+
+        def _match(self, mid: int):
+            if store.get_match(mid) is None:
+                return self._send(404, _page("No encontrado", "<h1>Partido no encontrado</h1>"))
+            sm = store.match_summary(mid)
+            labels = {e.key: e.label for e in get_sport(sm["sport"]).events}
+            filas = "".join(
+                f"<tr><td>{'&#11088; ' if p['player_id'] == sm['mvp'] else ''}"
+                f"<a href='/jugador/{p['player_id']}'>{html.escape(p['name'])}</a><td>{p['side']}"
+                f"<td>{'' if p['dorsal'] is None else p['dorsal']}"
+                f"<td>{html.escape(', '.join(f'{labels[k]}: {n}' for k, n in sorted(p['events'].items())) or '-')}</tr>"
+                for p in sm["players"])
+            estado = "Terminado" if sm["finished"] else "En juego"
+            self._send(200, _page(f"Partido {mid}", f"<p><a href='/'>&larr; Inicio</a></p><h1>Partido {mid}: "
+                                  f"{sm['score']['A']} - {sm['score']['B']}</h1><p>{estado} (&#11088; = figura)</p>"
+                                  f"<table><tr><th>Jugador<th>Equipo<th>N&deg;<th>Acciones</tr>{filas}</table>"))
 
         def _player(self, pid: int):
             player = store.get_player(pid)

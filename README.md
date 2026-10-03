@@ -11,7 +11,8 @@ Estadísticas deportivas con una cámara y Python. Son **funciones para meter en
 | Estadísticas, partidos, torneos con reglas elegibles | `sportcam/store.py`, `tournaments.py` | probado |
 | Gesto → evento → clip, todo junto | `sportcam/session.py` | probado con manos/caras simuladas |
 | Códigos de partido, check-in, deshacer, plan B manual, resumen de 30 s, purga de clips | `store.py`, `session.py`, `maintenance.py` | probado |
-| Página para ver las jugadas de cada jugador | `sportcam/viewer.py` | probado |
+| Calendario todos-contra-todos, llaves de eliminación, resumen y figura del partido | `fixtures.py`, `store.py` | probado |
+| Páginas web: jugadores y jugadas, torneos (tabla + calendario), partidos | `sportcam/viewer.py` | probado |
 
 El marketplace / inscripciones es tu app: `Store` es una implementación de referencia en SQLite;
 si ya tenés tu base, replicá esos métodos.
@@ -97,6 +98,19 @@ db.player_stats(ana)            # goles, asistencias, partidos ganados, torneos 
 db.list_clips(player_id=ana)    # jugadas guardadas, para tu página
 db.close_tournament(t)          # fija al campeón
 ```
+
+Calendario y resumen:
+
+```python
+db.schedule_tournament(t)                      # todos contra todos (double=True: ida y vuelta)
+cruce = db.tournament_fixtures(t)[0]           # estado: pendiente / en juego / jugado
+m = db.start_fixture(cruce["id"], dorsal_a=10, dorsal_b=7)   # crea el partido del cruce
+db.match_summary(m)                            # marcador, acciones por jugador y figura (MVP)
+from sportcam.fixtures import knockout_first_round
+knockout_first_round([1, 2, 3, 4, 5])          # llaves con byes para los mejores sembrados
+```
+`python -m sportcam.viewer` ahora también muestra `/torneo/ID` y `/partido/ID`.
+Los cruces del calendario son jugador contra jugador (A vs B).
 
 Criterios de torneo (`rank_by`): `wins`, `losses`, `draws`, `matches`, `win_rate`, `points`,
 `league_points` (3/1/0) y cualquier evento del deporte (`gol`, `asistencia`, `triple`...).
