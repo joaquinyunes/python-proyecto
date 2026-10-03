@@ -10,6 +10,7 @@ Estadísticas deportivas con una cámara y Python. Son **funciones para meter en
 | Deportes (fútbol, básquet, pádel; agregás los que quieras) | `sportcam/sports.py` | probado |
 | Estadísticas, partidos, torneos con reglas elegibles | `sportcam/store.py`, `tournaments.py` | probado |
 | Gesto → evento → clip, todo junto | `sportcam/session.py` | probado con manos/caras simuladas |
+| Códigos de partido, check-in, deshacer, plan B manual, resumen de 30 s, purga de clips | `store.py`, `session.py`, `maintenance.py` | probado |
 | Página para ver las jugadas de cada jugador | `sportcam/viewer.py` | probado |
 
 El marketplace / inscripciones es tu app: `Store` es una implementación de referencia en SQLite;
@@ -50,6 +51,20 @@ Durante el partido, quien juega muestra el gesto:
 - **1 dedo = gol** · 2 = asistencia · 3 = atajada (en básquet 1–7: libre, doble, triple, asistencia, rebote, robo, tapón; en pádel 1–4).
 - Si la cámara reconoce su cara, queda anotado. Si no, bajá la mano y mostrá tu **número de camiseta** (`1` y después puño = `10`).
 - En un gol se guarda el video de los **últimos 3 minutos** y aparece en la página del jugador.
+
+## Flujo recomendado en el lugar
+
+1. **Una vez, presencial:** el jugador se registra con su cara y acepta el consentimiento (`demos/caras.py registrar`).
+2. **Al alquilar la cancha:** el sistema crea el partido y un **código** de 6 caracteres que vence solo
+   (`store.create_match_code(m)` o `python demos/codigos.py crear`).
+3. **Cada jugador canjea el código** eligiendo equipo y número de camiseta
+   (`store.join_with_code(codigo, jugador, "A", 10)`). No se pueden repetir números.
+4. **Al arrancar, check-in:** cada uno pasa frente a la cámara (`session.check_in(frame)`); `store.missing_check_in(m)`
+   dice quién no confirmó su identidad.
+5. **Durante el partido:** gesto de evento + número, o la cara si se ve. Un error se corrige con **dos manos
+   abiertas (10 dedos)** = deshacer, o con `session.undo_last()` / `store.undo_event(id)`.
+   Si el gesto no anda, `session.record_manual("gol", dorsal=10)` desde un botón del celular.
+6. **Clips:** cada gol guarda el video de 3 min y un resumen de 30 s. `purge_old_clips(store, "clips", 30)` borra los viejos.
 
 ## Usarlo desde tu app
 

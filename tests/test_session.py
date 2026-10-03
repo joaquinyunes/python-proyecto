@@ -67,9 +67,10 @@ def test_gol_por_dorsal_guarda_evento_y_clip(setup):
     s.close()
     assert kinds(ups) == ["code", "digit", "digit", "event"], [u.message for u in ups]
     assert db.player_stats(ana)["events"] == {"gol": 1} and db.player_stats(beto)["events"] == {}
-    clips = db.list_clips(player_id=ana)
-    assert len(clips) == 1 and clips[0]["event_type"] == "gol"
-    assert (tmp / "clips" / clips[0]["path"]).exists() and clips[0]["seconds"] > 5
+    clips = {c["kind"]: c for c in db.list_clips(player_id=ana)}
+    assert set(clips) == {"full", "highlight"} and clips["full"]["event_type"] == "gol"
+    assert all((tmp / "clips" / c["path"]).exists() for c in clips.values())
+    assert clips["full"]["seconds"] > 5 and clips["highlight"]["seconds"] <= 30.5
     assert db.match_score(m) == {"A": 1, "B": 0}
     assert not s.errors
 
@@ -83,7 +84,7 @@ def test_gol_por_cara_no_pide_dorsal(setup):
     s.close()
     assert kinds(ups) == ["event"] and "cara" in ups[0].message
     assert db.player_stats(beto)["events"] == {"gol": 1}
-    assert len(db.list_clips(player_id=beto)) == 1
+    assert len(db.list_clips(player_id=beto, kind="full")) == 1
 
 
 def test_elige_la_cara_mas_cercana_a_la_mano_con_espejado(setup):
@@ -162,4 +163,42 @@ def test_si_falla_el_clip_el_evento_queda_y_se_reporta(setup):
     ups = run(s, hands)
     s.close()
     assert "event" in kinds(ups) and db.player_stats(ana)["events"] == {"gol": 1}
-    assert db.list_clips() == [] and len(s.errors) == 1 and "clip" in s.errors[0]
+    assert db.list_clips() == [] and s.errors and all("clip" in e for e in s.errors)
+
+
+def test_diez_dedos_deshace_el_ultimo_evento_y_borra_sus_clips(setup):
+    db, m, ana, beto, tmp = setup
+    hands = FakeHands([(None, 1), (1, 1.2), (None, 1.2), (1, 1.2), (0, 1.2), (None, 4), (10, 1.5)])
+    s = MatchSession(db, m, hands=hands, replay=ReplayBuffer(fps=FPS), clips_dir=tmp / "clips")
+    ups = []
+    for i in range(int((hands.duration + 1) * FPS)):
+        ups += s.process(np.full((H, W, 3), i % 255, np.uint8), t=i / FPS)
+        if i == int(8.5 * FPS):
+            s.replay.close()                      # espera a que se guarden los clips
+            assert len(db.list_clips()) == 2
+            s.replay = ReplayBuffer(fps=FPS)
+    assert kinds(ups)[-2:] == ["event", "undo"], kinds(ups)
+    assert db.player_stats(ana)["events"] == {} and db.list_clips() == []
+    assert not list((tmp / "clips").rglob("*.mp4"))
+    assert s.undo_last().kind == "info"           # ya no queda nada
+
+
+def test_registro_manual_plan_b(setup):
+    db, m, ana, beto, tmp = setup
+    s = MatchSession(db, m, hands=FakeHands([]), clips_dir=tmp)
+    assert s.record_manual("gol", dorsal=7).kind == "event"
+    assert s.record_manual("asistencia", player_id=ana).kind == "event"
+    assert s.record_manual("gol", dorsal=99).kind == "rejected"
+    assert db.player_stats(beto)["events"] == {"gol": 1}
+    with pytest.raises(KeyError):
+        s.record_manual("triple", dorsal=7)
+
+
+def test_check_in_marca_presentes_y_detecta_faltantes(setup):
+    db, m, ana, beto, tmp = setup
+    intruso = db.add_player("Intruso")
+    faces = FakeFaces([FaceMatch(ana, .3, (0, 10, 10, 0)), FaceMatch(intruso, .3, (0, 10, 10, 0)),
+                       FaceMatch(None, .9, (0, 10, 10, 0))])
+    s = MatchSession(db, m, hands=FakeHands([]), faces=faces, clips_dir=tmp)
+    assert s.check_in(np.zeros((H, W, 3), np.uint8)) == [ana]
+    assert db.missing_check_in(m) == [beto]

@@ -6,6 +6,7 @@ Es la implementación de referencia: si ya tenés tu propia base, replicá estos
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 import threading
 import time
@@ -41,7 +42,11 @@ CREATE TABLE IF NOT EXISTS match_players(
   match_id INTEGER NOT NULL REFERENCES matches(id),
   player_id INTEGER NOT NULL REFERENCES players(id),
   side TEXT NOT NULL CHECK(side IN ('A','B')), dorsal INTEGER,
+  checked_in INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(match_id, player_id));
+CREATE TABLE IF NOT EXISTS match_codes(
+  code TEXT PRIMARY KEY, match_id INTEGER NOT NULL REFERENCES matches(id),
+  expires_at REAL NOT NULL, max_uses INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY, match_id INTEGER NOT NULL REFERENCES matches(id),
   player_id INTEGER NOT NULL REFERENCES players(id),
@@ -50,7 +55,8 @@ CREATE TABLE IF NOT EXISTS clips(
   id INTEGER PRIMARY KEY,
   event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
   match_id INTEGER NOT NULL, player_id INTEGER NOT NULL,
-  path TEXT NOT NULL, seconds REAL NOT NULL, created_at REAL NOT NULL);
+  path TEXT NOT NULL, seconds REAL NOT NULL, created_at REAL NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'full');
 """
 
 
@@ -62,6 +68,16 @@ class Store:
         self._lock = threading.RLock()
         with self._lock:
             self._db.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Bases creadas con versiones anteriores: agrega las columnas nuevas."""
+        for table, col, ddl in (
+                ("clips", "kind", "TEXT NOT NULL DEFAULT 'full'"),
+                ("match_players", "checked_in", "INTEGER NOT NULL DEFAULT 0")):
+            cols = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
     def close(self) -> None:
         with self._lock:
@@ -134,6 +150,8 @@ class Store:
 
     def add_match_player(self, match_id: int, player_id: int, side: str,
                          dorsal: int | None = None) -> None:
+        if side not in ("A", "B"):
+            raise ValueError("el equipo debe ser 'A' o 'B'")
         m = self._require_open_match(match_id)
         if m["tournament_id"] is not None and not self._q(
                 "SELECT 1 FROM tournament_players WHERE tournament_id=? AND player_id=?",
@@ -154,6 +172,52 @@ class Store:
         rows = self._q("SELECT player_id FROM match_players WHERE match_id=? AND dorsal=?",
                        (match_id, dorsal))
         return rows[0]["player_id"] if rows else None
+
+    # ------------------------------------------------- códigos de partido / check-in
+    CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"   # sin 0/O/1/I/L para no confundir
+
+    def create_match_code(self, match_id: int, *, ttl_hours: float = 4.0,
+                          max_uses: int = 22) -> str:
+        """Código para que los jugadores se unan al partido (ej. al alquilar la cancha).
+        Aleatorio (6 caracteres), vence solo y tiene límite de usos."""
+        self._require_open_match(match_id)
+        for _ in range(10):
+            code = "".join(secrets.choice(self.CODE_ALPHABET) for _ in range(6))
+            if not self._q("SELECT 1 FROM match_codes WHERE code=?", (code,)):
+                self._w("INSERT INTO match_codes(code, match_id, expires_at, max_uses) "
+                        "VALUES (?,?,?,?)", (code, match_id, time.time() + ttl_hours * 3600, max_uses))
+                return code
+        raise RuntimeError("no se pudo generar un código único")
+
+    def join_with_code(self, code: str, player_id: int, side: str, dorsal: int) -> int:
+        """El jugador canjea el código eligiendo equipo y número. Devuelve el match_id.
+        Volver a canjear (mismo jugador) cambia su dorsal/equipo sin gastar otro uso.
+        Limitá los intentos por usuario en tu app para evitar adivinar códigos."""
+        if not 0 <= dorsal <= 99:
+            raise ValueError("el dorsal debe estar entre 0 y 99")
+        code = code.strip().upper()
+        with self._lock:
+            rows = self._q("SELECT * FROM match_codes WHERE code=?", (code,))
+            if not rows or rows[0]["expires_at"] < time.time():
+                raise ValueError("código inválido o vencido")
+            c = rows[0]
+            if self.get_player(player_id) is None:
+                raise ValueError(f"jugador {player_id} no existe")
+            already = self.player_in_match(c["match_id"], player_id)
+            if not already and c["uses"] >= c["max_uses"]:
+                raise ValueError("el código ya alcanzó su cupo de jugadores")
+            self.add_match_player(c["match_id"], player_id, side, dorsal)
+            if not already:
+                self._w("UPDATE match_codes SET uses=uses+1 WHERE code=?", (code,))
+            return c["match_id"]
+
+    def set_checked_in(self, match_id: int, player_id: int) -> None:
+        self._w("UPDATE match_players SET checked_in=1 WHERE match_id=? AND player_id=?",
+                (match_id, player_id))
+
+    def missing_check_in(self, match_id: int) -> list[int]:
+        return [r["player_id"] for r in self._q(
+            "SELECT player_id FROM match_players WHERE match_id=? AND checked_in=0", (match_id,))]
 
     def match_score(self, match_id: int) -> dict[str, int]:
         score = {"A": 0, "B": 0}
@@ -199,13 +263,40 @@ class Store:
                        (match_id, player_id, et.key, et.points, ts or time.time()))
 
     def add_clip(self, event_id: int, match_id: int, player_id: int, path: str,
-                 seconds: float) -> int:
+                 seconds: float, kind: str = "full") -> int:
         return self._w("INSERT INTO clips(event_id, match_id, player_id, path, seconds, "
-                       "created_at) VALUES (?,?,?,?,?,?)",
-                       (event_id, match_id, player_id, path, seconds, time.time()))
+                       "created_at, kind) VALUES (?,?,?,?,?,?,?)",
+                       (event_id, match_id, player_id, path, seconds, time.time(), kind))
+
+    def undo_event(self, event_id: int) -> list[str]:
+        """Borra un evento mal anotado (y sus clips). Devuelve las rutas de clips para borrar
+        los archivos. Solo en partidos abiertos: un partido cerrado no se reescribe."""
+        rows = self._q("SELECT match_id FROM events WHERE id=?", (event_id,))
+        if not rows:
+            raise ValueError(f"evento {event_id} no existe")
+        self._require_open_match(rows[0]["match_id"])
+        paths = [r["path"] for r in self._q("SELECT path FROM clips WHERE event_id=?", (event_id,))]
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM clips WHERE event_id=?", (event_id,))
+            self._db.execute("DELETE FROM events WHERE id=?", (event_id,))
+        return paths
+
+    def event_exists(self, event_id: int) -> bool:
+        return bool(self._q("SELECT 1 FROM events WHERE id=?", (event_id,)))
+
+    def last_event(self, match_id: int) -> dict | None:
+        rows = self._q("SELECT * FROM events WHERE match_id=? ORDER BY id DESC LIMIT 1", (match_id,))
+        return dict(rows[0]) if rows else None
+
+    def expired_clips(self, older_than_days: float) -> list[dict]:
+        cutoff = time.time() - older_than_days * 86400
+        return [dict(r) for r in self._q("SELECT * FROM clips WHERE created_at < ?", (cutoff,))]
+
+    def delete_clip(self, clip_id: int) -> None:
+        self._w("DELETE FROM clips WHERE id=?", (clip_id,))
 
     def list_clips(self, *, player_id: int | None = None,
-                   match_id: int | None = None) -> list[dict]:
+                   match_id: int | None = None, kind: str | None = None) -> list[dict]:
         sql = ("SELECT c.*, e.type AS event_type, e.ts AS event_ts, m.sport "
                "FROM clips c JOIN events e ON e.id=c.event_id JOIN matches m ON m.id=c.match_id")
         where, params = [], []
@@ -213,6 +304,8 @@ class Store:
             where.append("c.player_id=?"); params.append(player_id)
         if match_id is not None:
             where.append("c.match_id=?"); params.append(match_id)
+        if kind is not None:
+            where.append("c.kind=?"); params.append(kind)
         if where:
             sql += " WHERE " + " AND ".join(where)
         return [dict(r) for r in self._q(sql + " ORDER BY c.created_at DESC", tuple(params))]

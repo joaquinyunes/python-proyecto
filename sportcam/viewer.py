@@ -76,7 +76,7 @@ def make_handler(store: Store, clips_dir: Path):
             clips = "".join(
                 f"<div class=clip><b>{html.escape(labels.get(c['event_type'], c['event_type']))}</b> - "
                 f"{time.strftime('%d/%m/%Y %H:%M', time.localtime(c['event_ts']))} "
-                f"(partido {c['match_id']})<br><video controls preload=metadata "
+                f"({'resumen' if c['kind'] == 'highlight' else 'últimos 3 min'}, partido {c['match_id']})<br><video controls preload=metadata "
                 f"src='/clips/{html.escape(c['path'], quote=True)}'></video></div>"
                 for c in store.list_clips(player_id=pid)) or "<p>Todavía no hay jugadas guardadas.</p>"
             body = (f"<p><a href='/'>&larr; Jugadores</a></p><h1>{html.escape(player['name'])}</h1>"

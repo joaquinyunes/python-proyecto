@@ -1,6 +1,7 @@
 """PRUEBA 3 - Partido completo: gestos + caras + replay de 3 minutos + estadísticas.
 
     python demos/partido.py --deporte futbol --jugador Ana:A:10 --jugador Beto:B:7
+    python demos/partido.py --partido 1          # partido creado con código (demos/codigos.py)
 
 Cada --jugador es  nombre:equipo(A/B):dorsal.  Si el nombre no existe en la base, se crea.
 Si registraste su cara (demos/caras.py registrar), se reconoce solo; si no, usa el dorsal.
@@ -8,7 +9,8 @@ Si registraste su cara (demos/caras.py registrar), se reconoce solo; si no, usa 
 Cómo se usa durante el partido (el gesto lo hace quien jugó):
   1) Mostrá el número del evento sostenido ~1 s:   1 dedo = gol (fútbol), 2 = asistencia, 3 = atajada
   2) Si la cámara no te reconoce, bajá la mano y mostrá tu número de camiseta (1 y puño = 10).
-  3) En un gol se guarda el replay de los últimos 3 minutos.
+  3) En un gol se guarda el replay de los últimos 3 minutos y un resumen de 30 s.
+  4) Dos manos abiertas (10 dedos) = deshacer el último evento.
 Terminar el partido: q o Esc. Después: python -m sportcam.viewer
 """
 import argparse
@@ -39,7 +41,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     add_video_args(ap)
     ap.add_argument("--deporte", default="futbol", choices=sorted(SPORTS))
-    ap.add_argument("--jugador", action="append", required=True, metavar="NOMBRE:EQUIPO:DORSAL")
+    ap.add_argument("--jugador", action="append", default=[], metavar="NOMBRE:EQUIPO:DORSAL")
+    ap.add_argument("--partido", type=int, help="usar un partido existente (ya con jugadores)")
     ap.add_argument("--db", default="sportcam.db")
     ap.add_argument("--clips", default="clips")
     ap.add_argument("--clip-segundos", type=float, default=180.0)
@@ -47,13 +50,26 @@ def main():
     args = ap.parse_args()
 
     store = Store(args.db)
-    match = store.create_match(args.deporte)
     nombres = {}
-    for spec in args.jugador:
-        name, side, dorsal = parse_player(spec)
-        pid = store.find_player(name) or store.add_player(name)
-        store.add_match_player(match, pid, side, dorsal)
-        nombres[pid] = name
+    if args.partido:
+        match = args.partido
+        info = store.get_match(match)
+        if info is None or info["finished_at"] is not None:
+            sys.exit(f"El partido {match} no existe o ya terminó.")
+        args.deporte = info["sport"]
+        nombres = {r["player_id"]: store.get_player(r["player_id"])["name"] for r in store._q(
+            "SELECT player_id FROM match_players WHERE match_id=?", (match,))}
+        if not nombres:
+            sys.exit("Ese partido todavía no tiene jugadores: que canjeen el código primero.")
+    else:
+        if not args.jugador:
+            sys.exit("Indicá --partido ID o al menos un --jugador nombre:A:10")
+        match = store.create_match(args.deporte)
+        for spec in args.jugador:
+            name, side, dorsal = parse_player(spec)
+            pid = store.find_player(name) or store.add_player(name)
+            store.add_match_player(match, pid, side, dorsal)
+            nombres[pid] = name
 
     faces = None
     if not args.sin_caras:
