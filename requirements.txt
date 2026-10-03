@@ -1,0 +1,8 @@
+# Probado con Python 3.11. No instales "opencv-python" junto a "opencv-contrib-python":
+# MediaPipe ya depende de la versión contrib y las dos juntas se pisan.
+numpy
+opencv-contrib-python
+mediapipe
+imageio-ffmpeg
+dlib-bin
+face_recognition_models

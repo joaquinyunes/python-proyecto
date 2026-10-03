@@ -1,0 +1,76 @@
+import threading
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
+
+import pytest
+
+from sportcam.store import Store
+from sportcam.viewer import make_handler
+
+VIDEO = bytes(range(256)) * 4      # 1024 bytes "de video"
+
+
+@pytest.fixture
+def server(tmp_path):
+    clips = tmp_path / "clips"
+    (clips / "partido_1").mkdir(parents=True)
+    (clips / "partido_1" / "gol.mp4").write_bytes(VIDEO)
+    (tmp_path / "secreto.mp4").write_bytes(b"NO DEBERIA SERVIRSE")
+    (clips / "nota.txt").write_text("no es video")
+
+    db = Store(":memory:")
+    p = db.add_player("<script>alert(1)</script>")
+    q = db.add_player("Beto")
+    m = db.create_match("futbol")
+    db.add_match_player(m, p, "A", dorsal=9)
+    e = db.add_event(m, p, "gol")
+    db.add_clip(e, m, p, "partido_1/gol.mp4", 180.0)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db, clips))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_port}", p, q
+    srv.shutdown()
+    db.close()
+
+
+def get(url, headers=None):
+    req = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+def test_nombres_se_escapan_y_aparece_la_jugada(server):
+    base, p, q = server
+    status, _, body = get(f"{base}/")
+    assert status == 200 and b"<script>" not in body and b"&lt;script&gt;" in body
+    status, _, body = get(f"{base}/jugador/{p}")
+    assert status == 200 and b"<script>alert" not in body
+    assert b"src='/clips/partido_1/gol.mp4'" in body and b"Gol" in body
+    assert b"Todav" in get(f"{base}/jugador/{q}")[2]       # sin jugadas
+    assert get(f"{base}/jugador/999")[0] == 404 and get(f"{base}/nada")[0] == 404
+
+
+def test_video_completo_y_por_rangos(server):
+    base, *_ = server
+    status, h, body = get(f"{base}/clips/partido_1/gol.mp4")
+    assert status == 200 and body == VIDEO and h["Content-Type"] == "video/mp4"
+    status, h, body = get(f"{base}/clips/partido_1/gol.mp4", {"Range": "bytes=10-19"})
+    assert status == 206 and body == VIDEO[10:20] and h["Content-Range"] == "bytes 10-19/1024"
+    status, h, body = get(f"{base}/clips/partido_1/gol.mp4", {"Range": "bytes=-5"})
+    assert status == 206 and body == VIDEO[-5:]
+    status, _, body = get(f"{base}/clips/partido_1/gol.mp4", {"Range": "bytes=1000-"})
+    assert status == 206 and body == VIDEO[1000:]
+    assert get(f"{base}/clips/partido_1/gol.mp4", {"Range": "bytes=5000-"})[0] == 416
+
+
+@pytest.mark.parametrize("ruta", [
+    "/clips/../secreto.mp4", "/clips/%2e%2e/secreto.mp4", "/clips/partido_1/../../secreto.mp4",
+    "/clips/nota.txt", "/clips/partido_1/no_existe.mp4", "/clips/%2e%2e%2fsecreto.mp4"])
+def test_no_sirve_archivos_fuera_de_clips(server, ruta):
+    base, *_ = server
+    status, _, body = get(base + ruta)
+    assert status == 404 and b"NO DEBERIA" not in body
