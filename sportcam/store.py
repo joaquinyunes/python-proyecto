@@ -39,6 +39,16 @@ CREATE TABLE IF NOT EXISTS fixtures(
   id INTEGER PRIMARY KEY, tournament_id INTEGER NOT NULL REFERENCES tournaments(id),
   round INTEGER NOT NULL, a_id INTEGER NOT NULL REFERENCES players(id),
   b_id INTEGER NOT NULL REFERENCES players(id), match_id INTEGER REFERENCES matches(id));
+CREATE TABLE IF NOT EXISTS teams(
+  id INTEGER PRIMARY KEY, tournament_id INTEGER NOT NULL REFERENCES tournaments(id),
+  name TEXT NOT NULL, UNIQUE(tournament_id, name));
+CREATE TABLE IF NOT EXISTS team_members(
+  tournament_id INTEGER NOT NULL, player_id INTEGER NOT NULL REFERENCES players(id),
+  team_id INTEGER NOT NULL REFERENCES teams(id), PRIMARY KEY(tournament_id, player_id));
+CREATE TABLE IF NOT EXISTS team_fixtures(
+  id INTEGER PRIMARY KEY, tournament_id INTEGER NOT NULL REFERENCES tournaments(id),
+  round INTEGER NOT NULL, a_team INTEGER NOT NULL REFERENCES teams(id),
+  b_team INTEGER NOT NULL REFERENCES teams(id), match_id INTEGER REFERENCES matches(id));
 CREATE TABLE IF NOT EXISTS matches(
   id INTEGER PRIMARY KEY, sport TEXT NOT NULL,
   tournament_id INTEGER REFERENCES tournaments(id),
@@ -494,3 +504,107 @@ class Store:
         return {"match_id": match_id, "sport": m["sport"], "score": self.match_score(match_id),
                 "winner": m["winner"], "finished": m["finished_at"] is not None,
                 "players": players, "mvp": mvp["player_id"] if mvp else None}
+
+    # ------------------------------------------------------ torneos por equipos
+    def create_team(self, tournament_id: int, name: str, player_ids: list[int]) -> int:
+        """Crea un equipo dentro del torneo; los jugadores entran al torneo si no estaban.
+        Un jugador solo puede estar en un equipo por torneo."""
+        t = self.get_tournament(tournament_id)
+        if t is None:
+            raise ValueError(f"torneo {tournament_id} no existe")
+        if t["closed_at"] is not None:
+            raise ValueError("el torneo ya está cerrado")
+        if self._q("SELECT 1 FROM team_fixtures WHERE tournament_id=?", (tournament_id,)):
+            raise ValueError("el calendario ya fue generado: no se pueden agregar equipos")
+        if not player_ids or len(set(player_ids)) != len(player_ids):
+            raise ValueError("un equipo necesita jugadores y sin repetir")
+        for pid in player_ids:
+            if self.get_player(pid) is None:
+                raise ValueError(f"jugador {pid} no existe")
+            if self._q("SELECT 1 FROM team_members WHERE tournament_id=? AND player_id=?",
+                       (tournament_id, pid)):
+                raise ValueError(f"el jugador {pid} ya está en otro equipo de este torneo")
+        try:
+            team_id = self._w("INSERT INTO teams(tournament_id, name) VALUES (?,?)", (tournament_id, name))
+        except sqlite3.IntegrityError:
+            raise ValueError(f"ya existe un equipo '{name}' en este torneo") from None
+        for pid in player_ids:
+            self.join_tournament(tournament_id, pid)
+            self._w("INSERT INTO team_members(tournament_id, player_id, team_id) VALUES (?,?,?)",
+                    (tournament_id, pid, team_id))
+        return team_id
+
+    def team_players(self, team_id: int) -> list[int]:
+        return [r["player_id"] for r in self._q(
+            "SELECT player_id FROM team_members WHERE team_id=? ORDER BY player_id", (team_id,))]
+
+    def list_teams(self, tournament_id: int) -> list[dict]:
+        return [{**dict(r), "players": self.team_players(r["id"])} for r in self._q(
+            "SELECT * FROM teams WHERE tournament_id=? ORDER BY id", (tournament_id,))]
+
+    def schedule_teams(self, tournament_id: int, *, double: bool = False) -> int:
+        """Fixture todos-contra-todos entre los equipos del torneo."""
+        if self._q("SELECT 1 FROM team_fixtures WHERE tournament_id=?", (tournament_id,)):
+            raise ValueError("el torneo ya tiene calendario de equipos")
+        ids = [t["id"] for t in self.list_teams(tournament_id)]
+        rounds = fx.round_robin(ids, double=double)
+        with self._lock, self._db:
+            for i, pairs in enumerate(rounds, 1):
+                for a, b in pairs:
+                    self._db.execute("INSERT INTO team_fixtures(tournament_id, round, a_team, b_team) "
+                                     "VALUES (?,?,?,?)", (tournament_id, i, a, b))
+        return sum(len(r) for r in rounds)
+
+    def team_fixtures(self, tournament_id: int) -> list[dict]:
+        out = []
+        for r in self._q(
+                "SELECT f.*, m.finished_at FROM team_fixtures f LEFT JOIN matches m ON m.id=f.match_id "
+                "WHERE f.tournament_id=? ORDER BY f.round, f.id", (tournament_id,)):
+            d = dict(r)
+            d["status"] = ("pendiente" if d["match_id"] is None
+                           else "jugado" if d["finished_at"] else "en juego")
+            out.append(d)
+        return out
+
+    def start_team_fixture(self, fixture_id: int, dorsals: dict[int, int] | None = None) -> int:
+        """Crea el partido del cruce: jugadores del equipo A en el lado A y los del B en el B.
+        `dorsals` = {player_id: número} (opcional; también se pueden canjear con código)."""
+        rows = self._q("SELECT f.*, t.sport FROM team_fixtures f JOIN tournaments t "
+                       "ON t.id=f.tournament_id WHERE f.id=?", (fixture_id,))
+        if not rows:
+            raise ValueError(f"cruce {fixture_id} no existe")
+        f = rows[0]
+        if f["match_id"] is not None:
+            raise ValueError("ese cruce ya se está jugando o se jugó")
+        dorsals = dorsals or {}
+        m = self.create_match(f["sport"], tournament_id=f["tournament_id"])
+        for team, side in ((f["a_team"], "A"), (f["b_team"], "B")):
+            for pid in self.team_players(team):
+                self.add_match_player(m, pid, side, dorsals.get(pid))
+        self._w("UPDATE team_fixtures SET match_id=? WHERE id=?", (m, fixture_id))
+        return m
+
+    def team_standings(self, tournament_id: int) -> list[dict]:
+        """Tabla de equipos: puntos de tabla (3/1/0), luego diferencia de goles/puntos, luego a favor."""
+        table = {t["id"]: {"team_id": t["id"], "name": t["name"], "played": 0, "wins": 0, "draws": 0,
+                           "losses": 0, "for": 0, "against": 0} for t in self.list_teams(tournament_id)}
+        for f in self.team_fixtures(tournament_id):
+            if f["status"] != "jugado":
+                continue
+            m = self.get_match(f["match_id"])
+            score = self.match_score(f["match_id"])
+            a, b = table[f["a_team"]], table[f["b_team"]]
+            for row, gf, ga in ((a, score["A"], score["B"]), (b, score["B"], score["A"])):
+                row["played"] += 1; row["for"] += gf; row["against"] += ga
+            if m["winner"] == "D":
+                a["draws"] += 1; b["draws"] += 1
+            else:
+                win, lose = (a, b) if m["winner"] == "A" else (b, a)
+                win["wins"] += 1; lose["losses"] += 1
+        rows = []
+        for r in table.values():
+            r["points"] = 3 * r["wins"] + r["draws"]
+            r["diff"] = r["for"] - r["against"]
+            rows.append(r)
+        rows.sort(key=lambda r: (-r["points"], -r["diff"], -r["for"], r["team_id"]))
+        return [{"position": i + 1, **r} for i, r in enumerate(rows)]

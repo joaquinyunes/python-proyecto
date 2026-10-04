@@ -110,7 +110,17 @@ from sportcam.fixtures import knockout_first_round
 knockout_first_round([1, 2, 3, 4, 5])          # llaves con byes para los mejores sembrados
 ```
 `python -m sportcam.viewer` ahora también muestra `/torneo/ID` y `/partido/ID`.
-Los cruces del calendario son jugador contra jugador (A vs B).
+Torneos por equipos (equipo contra equipo):
+
+```python
+rojos = db.create_team(t, "Rojos", [ana, beto])      # un jugador, un solo equipo por torneo
+azules = db.create_team(t, "Azules", [cami, dani])
+db.schedule_teams(t)                                  # calendario entre equipos
+m = db.start_team_fixture(db.team_fixtures(t)[0]["id"], dorsals={ana: 10, beto: 7, cami: 9, dani: 4})
+db.team_standings(t)                                  # 3/1/0 puntos, desempate por diferencia y goles a favor
+```
+Los jugadores siguen acumulando sus propias estadísticas y `leaderboard(t)` sigue funcionando.
+`schedule_tournament` (sin equipos) arma cruces jugador contra jugador.
 
 Criterios de torneo (`rank_by`): `wins`, `losses`, `draws`, `matches`, `win_rate`, `points`,
 `league_points` (3/1/0) y cualquier evento del deporte (`gol`, `asistencia`, `triple`...).

@@ -91,11 +91,24 @@ def make_handler(store: Store, clips_dir: Path):
                 f"<tr><td>{f['round']}<td>{self._name(f['a_id'])} vs {self._name(f['b_id'])}<td>{f['status']}"
                 f"<td>{'<a href=/partido/%d>ver</a>' % f['match_id'] if f['match_id'] else ''}</tr>"
                 for f in store.tournament_fixtures(tid))
+            equipos = ""
+            if store.list_teams(tid):
+                names = {x["id"]: html.escape(x["name"]) for x in store.list_teams(tid)}
+                filas_e = "".join(
+                    f"<tr><td>{r['position']}<td>{html.escape(r['name'])}<td>{r['played']}<td>{r['wins']}"
+                    f"<td>{r['draws']}<td>{r['losses']}<td>{r['for']}:{r['against']}<td>{r['points']}</tr>"
+                    for r in store.team_standings(tid))
+                cruces_e = "".join(
+                    f"<tr><td>{f['round']}<td>{names[f['a_team']]} vs {names[f['b_team']]}<td>{f['status']}"
+                    f"<td>{'<a href=/partido/%d>ver</a>' % f['match_id'] if f['match_id'] else ''}</tr>"
+                    for f in store.team_fixtures(tid))
+                equipos = ("<h2>Equipos</h2><table><tr><th>#<th>Equipo<th>PJ<th>G<th>E<th>P<th>Goles<th>Pts</tr>"
+                           f"{filas_e}</table><table><tr><th>Ronda<th>Cruce<th>Estado<th></tr>{cruces_e}</table>")
             campeon = f"<p><b>Campeón: {self._name(t['champion_id'])}</b></p>" if t["champion_id"] else ""
             self._send(200, _page(t["name"], f"<p><a href='/'>&larr; Inicio</a></p><h1>{html.escape(t['name'])}</h1>"
                                   f"{campeon}<p>Gana: {regla}</p><table><tr><th>#<th>Jugador<th>PJ<th>G<th>E<th>P"
                                   f"<th>Pts</tr>{filas}</table><h2>Calendario</h2><table><tr><th>Ronda<th>Cruce"
-                                  f"<th>Estado<th></tr>{cruces}</table>"))
+                                  f"<th>Estado<th></tr>{cruces}</table>{equipos}"))
 
         def _match(self, mid: int):
             if store.get_match(mid) is None:
