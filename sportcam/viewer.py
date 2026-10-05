@@ -11,9 +11,13 @@ import argparse
 import html
 import re
 import time
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from urllib.parse import parse_qs, urlsplit
+
+from .lobby import Lobby
 from .sports import SPORTS, get_sport
 from .tournaments import available_metrics
 from .store import Store
@@ -49,7 +53,10 @@ def make_handler(store: Store, clips_dir: Path):
         do_HEAD = lambda self: self.do_GET()   # noqa: E731
 
         def do_GET(self):
-            path = self.path.split("?")[0]
+            url = urlsplit(self.path)
+            path, query = url.path, parse_qs(url.query)
+            if path == "/quiero-jugar":
+                return self._lobby(query)
             if path == "/":
                 return self._index()
             if m := re.fullmatch(r"/jugador/(\d+)", path):
@@ -72,7 +79,44 @@ def make_handler(store: Store, clips_dir: Path):
                 f"<li><a href='/torneo/{t['id']}'>{html.escape(t['name'])}</a> ({html.escape(t['sport'])})</li>"
                 for t in store.list_tournaments())
             self._send(200, _page("Jugadores", "<h1>Jugadores</h1><table><tr><th>Jugador<th>Partidos"
-                                  f"<th>Jugadas</tr>{rows}</table><h2>Torneos</h2><ul>{torneos or '<li>Ninguno todavía</li>'}</ul>"))
+                                  f"<th>Jugadas</tr>{rows}</table><p><a href='/quiero-jugar'><b>Quiero jugar</b></a></p><h2>Torneos</h2><ul>{torneos or '<li>Ninguno todavía</li>'}</ul>"))
+
+        def _lobby(self, query: dict):
+            sport = (query.get("deporte") or [""])[0] or None
+            try:
+                day = date.fromisoformat(query["dia"][0]) if query.get("dia") and query["dia"][0] else None
+            except ValueError:
+                day = None
+            if sport not in SPORTS:
+                sport = None
+            posts = Lobby(store).list_posts(sport, day)
+
+            def table(items, vacio):
+                if not items:
+                    return f"<p>{vacio}</p>"
+                rows = "".join(
+                    f"<tr><td>{time.strftime('%d/%m %H:%M', time.localtime(x['starts_at']))}"
+                    f"<td>{html.escape(SPORTS[x['sport']].name)}"
+                    f"<td>{html.escape(x['name'] or 'Equipo de ' + store.get_player(x['creator_id'])['name'])}"
+                    f"<td>{x['size']}/{x['team_size']}"
+                    f"<td>{'' if x['ready'] else 'faltan ' + str(x['missing'])}"
+                    f"<td>{html.escape(x['place'] or '')}<td>{html.escape(x['note'] or '')}</tr>"
+                    for x in items)
+                return ("<table><tr><th>Cuándo<th>Deporte<th>Equipo<th>Jugadores<th><th>Lugar<th>Nota</tr>"
+                        f"{rows}</table>")
+
+            opciones = "".join(
+                f"<option value='{k}'{' selected' if k == sport else ''}>{html.escape(v.name)}</option>"
+                for k, v in SPORTS.items())
+            form = (f"<form method=get><select name=deporte><option value=''>Todos los deportes</option>{opciones}"
+                    f"</select> <input type=date name=dia value='{day.isoformat() if day else ''}'> "
+                    "<button>Filtrar</button></form>")
+            body = (f"<p><a href='/'>&larr; Inicio</a></p><h1>Quiero jugar</h1>{form}"
+                    f"<h2>Equipos armados que buscan rival ({len(posts['armados'])})</h2>"
+                    f"{table(posts['armados'], 'No hay equipos armados para ese filtro.')}"
+                    f"<h2>Equipos a los que les faltan jugadores ({len(posts['incompletos'])})</h2>"
+                    f"{table(posts['incompletos'], 'No hay equipos buscando jugadores para ese filtro.')}")
+            self._send(200, _page("Quiero jugar", body))
 
         def _name(self, pid: int) -> str:
             return html.escape(store.get_player(pid)["name"])

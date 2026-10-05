@@ -97,3 +97,31 @@ def test_paginas_de_torneo_y_partido(tmp_path):
         assert get(f"{base}/torneo/99")[0] == 404 and get(f"{base}/partido/99")[0] == 404
     finally:
         srv.shutdown(); db.close()
+
+
+def test_pagina_quiero_jugar(tmp_path):
+    from datetime import datetime, timedelta
+    from sportcam.lobby import Lobby
+    db = Store(":memory:")
+    ids = [db.add_player(n) for n in ("<b>Ana</b>", "Beto", "Cami", "Dani")]
+    lb = Lobby(db)
+    manana = datetime.now() + timedelta(days=1)
+    lb.create_post(ids[0], "padel", manana, members=[ids[1]], place="Cancha <1>", name="Los <i>Cracks</i>")
+    lb.create_post(ids[2], "futbol", manana, note="traer pechera")
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db, tmp_path))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        status, _, body = get(f"{base}/quiero-jugar")
+        assert status == 200 and b"armados que buscan rival (1)" in body
+        assert b"faltan 4" in body and b"2/2" in body and b"1/5" in body
+        assert b"<i>Cracks" not in body and b"&lt;i&gt;Cracks" in body and b"Cancha &lt;1&gt;" in body
+        status, _, body = get(f"{base}/quiero-jugar?deporte=padel")
+        assert b"(1)" in body and b"traer pechera" not in body and b"selected" in body
+        dia = manana.date().isoformat()
+        assert b"traer pechera" in get(f"{base}/quiero-jugar?dia={dia}")[2]
+        assert b"traer pechera" not in get(f"{base}/quiero-jugar?dia=2001-01-01")[2]
+        assert get(f"{base}/quiero-jugar?dia=basura&deporte=nada")[0] == 200      # filtros inválidos se ignoran
+        assert b"/quiero-jugar" in get(f"{base}/")[2]
+    finally:
+        srv.shutdown(); db.close()

@@ -12,6 +12,7 @@ Estadísticas deportivas con una cámara y Python. Son **funciones para meter en
 | Gesto → evento → clip, todo junto | `sportcam/session.py` | probado con manos/caras simuladas |
 | Códigos de partido, check-in, deshacer, plan B manual, resumen de 30 s, purga de clips | `store.py`, `session.py`, `maintenance.py` | probado |
 | Calendario todos-contra-todos, llaves de eliminación, resumen y figura del partido | `fixtures.py`, `store.py` | probado |
+| "Quiero jugar": equipos armados / incompletos, filtros por día y deporte, emparejar | `sportcam/lobby.py` | probado |
 | Páginas web: jugadores y jugadas, torneos (tabla + calendario), partidos | `sportcam/viewer.py` | probado |
 
 El marketplace / inscripciones es tu app: `Store` es una implementación de referencia en SQLite;
@@ -52,6 +53,29 @@ Durante el partido, quien juega muestra el gesto:
 - **1 dedo = gol** · 2 = asistencia · 3 = atajada (en básquet 1–7: libre, doble, triple, asistencia, rebote, robo, tapón; en pádel 1–4).
 - Si la cámara reconoce su cara, queda anotado. Si no, bajá la mano y mostrá tu **número de camiseta** (`1` y después puño = `10`).
 - En un gol se guarda el video de los **últimos 3 minutos** y aparece en la página del jugador.
+
+## Quiero jugar (equipos armados y equipos incompletos)
+
+Cada anuncio es un equipo con **día, hora y lugar**. El sistema lo clasifica solo según cuántos jugadores tenga:
+**armado** (completo, busca rival) o **incompleto** (muestra cuántos faltan). Al sumarse el último jugador pasa a "armados".
+Tamaño por defecto: fútbol 5, básquet 5, pádel 2 (se puede cambiar con `team_size`).
+
+```python
+from datetime import datetime
+from sportcam.lobby import Lobby
+lobby = Lobby(db)
+a = lobby.create_post(ana, "padel", datetime(2026, 10, 8, 20, 0), members=[beto], place="Cancha 2")  # pareja armada
+b = lobby.create_post(carla, "padel", datetime(2026, 10, 8, 20, 30))                                 # le falta 1
+lobby.join_post(b, dario)                                  # se completa y pasa a "armados"
+lobby.list_posts("padel")                                  # {"armados": [...], "incompletos": [...]}; filtro: day=date(...)
+lobby.suggest_rivals(a)                                    # equipos armados del mismo deporte a horario parecido
+m = lobby.match_posts(a, b)                                # crea el partido A vs B (y sale de la lista)
+```
+Reglas: el horario tiene que ser a futuro; un jugador no puede estar en dos anuncios del mismo deporte con
+menos de 2 h de diferencia; solo el creador cancela (si se va, pasa el anfitrión al siguiente).
+La página `python -m sportcam.viewer` → `/quiero-jugar` muestra las dos secciones con filtros por deporte y día.
+Por consola: `python demos/quiero_jugar.py --help`. Las horas son la hora local del servidor.
+La web es de solo lectura: publicar y sumarse se hace desde tu app con estas funciones (con tu login).
 
 ## Flujo recomendado en el lugar
 

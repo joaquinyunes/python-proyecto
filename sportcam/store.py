@@ -49,6 +49,16 @@ CREATE TABLE IF NOT EXISTS team_fixtures(
   id INTEGER PRIMARY KEY, tournament_id INTEGER NOT NULL REFERENCES tournaments(id),
   round INTEGER NOT NULL, a_team INTEGER NOT NULL REFERENCES teams(id),
   b_team INTEGER NOT NULL REFERENCES teams(id), match_id INTEGER REFERENCES matches(id));
+CREATE TABLE IF NOT EXISTS lobby_posts(
+  id INTEGER PRIMARY KEY, sport TEXT NOT NULL, name TEXT,
+  creator_id INTEGER NOT NULL REFERENCES players(id),
+  starts_at REAL NOT NULL, team_size INTEGER NOT NULL, place TEXT, note TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','matched','cancelled')),
+  match_id INTEGER REFERENCES matches(id), created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS lobby_members(
+  post_id INTEGER NOT NULL REFERENCES lobby_posts(id),
+  player_id INTEGER NOT NULL REFERENCES players(id), joined_at REAL NOT NULL,
+  PRIMARY KEY(post_id, player_id));
 CREATE TABLE IF NOT EXISTS matches(
   id INTEGER PRIMARY KEY, sport TEXT NOT NULL,
   tournament_id INTEGER REFERENCES tournaments(id),
